@@ -7,10 +7,6 @@
         "name": "my_custom_ips",
         "uri": "./my_ipinfo_data.txt"
       }
-    },
-    {
-      "type": "private",
-      "action": "add"
     }
   ],
   "output": [
@@ -20,7 +16,7 @@
       "args": {
         "outputDir": "./output",
         "outputName": "geoip-custom.dat",
-        "wantedList": ["my_custom_ips", "private"]
+        "wantedList": ["my_custom_ips"]
       }
     }
   ]
