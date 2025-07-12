@@ -1,11 +1,10 @@
 {
   "input": [
     {
-      "type": "text",
+      "type": "ipinfoCountryMMDB",
       "action": "add",
       "args": {
-        "name": "my_custom_ips",
-        "uri": "./my_ipinfo_data.txt"
+        "uri": "./ipinfo_data/ipinfo_lite.mmdb"
       }
     }
   ],
@@ -15,8 +14,8 @@
       "action": "output",
       "args": {
         "outputDir": "./output",
-        "outputName": "geoip-custom.dat",
-        "wantedList": ["my_custom_ips"]
+        "outputName": "geoip-sg.dat",
+        "wantedList": ["sg"]
       }
     }
   ]
