@@ -91,31 +91,30 @@ jobs:
             echo "has_files=false" >> $GITHUB_OUTPUT
           fi
 
-      # 步骤8：使用 v2fly/geoip 工具将文本IP列表转换为 dat 文件
+      # 步骤8：使用 Loyalsoldier/geoip 工具将文本IP列表转换为 dat 文件
       # 仅在 extract_ips 步骤成功提取到 IP 时运行
       - name: Generate dat file from text list
         if: steps.extract_ips.outputs.has_files == 'true'
         run: |
-          # 编译 v2fly/geoip 工具
+          # 编译 Loyalsoldier/geoip 工具
           go build ./
 
-          # 动态创建 config.json 文件。这是 v2fly/geoip 工具唯一接受的输入方式。
-          # 这个配置告诉工具：
-          # 1. 定义一个名为 "custom_loader" 的自定义数据加载器。
-          # 2. 在这个加载器中，我们将标签 "sg" 指向我们刚刚生成的 sg_cidrs.txt 文件。
-          # 3. 创建一个任务，从 "custom_loader" 中提取带有 "sg" 标签的数据，并输出到 geoip-sg.dat。
+          # 动态创建完全符合 Loyalsoldier/geoip 规范的 config.json 文件
+          # 参考文档：https://github.com/Loyalsoldier/geoip
           cat <<EOF > config.json
           {
-            "dat_loader": "custom_loader",
-            "dat_files": {
-              "custom_loader": {
-                "sg": "./sg_cidrs.txt"
-              }
-            },
-            "tasks": [
+            "inputs": [
               {
-                "output": "./output/geoip-sg.dat",
-                "wanted_list": [
+                "type": "text",
+                "tag": "sg",
+                "path": "./sg_cidrs.txt"
+              }
+            ],
+            "outputs": [
+              {
+                "type": "v2rayGeoIPDat",
+                "path": "./output/geoip-sg.dat",
+                "lists": [
                   "sg"
                 ]
               }
@@ -127,14 +126,13 @@ jobs:
           echo "Generated config.json:"
           cat config.json
 
-          # 创建输出目录，以防万一
+          # 创建输出目录
           mkdir -p ./output
           
           # 使用配置文件运行正确的转换命令
           echo "Running geoip conversion with config file..."
           ./geoip convert -c ./config.json
           echo "Conversion completed successfully!"
-
  
       # --- 核心改动结束 ---
  
