@@ -51,11 +51,15 @@ jobs:
           go install github.com/ipinfo/cli/ipinfo@latest
           echo "$HOME/go/bin" >> $GITHUB_PATH
 
-      # 步骤6：从 MMDB 提取并分流 SG 的 IP 地址段
+      # 步骤6：从 MMDB 提取并分流 SG 的 IP 地址段 (最终健壮版)
       - name: Extract and Split SG IP Ranges from MMDB
         id: extract_ips
         run: |
-          ipinfo mmdb export ./data/ipinfo_lite.mmdb | \
+          # 最终解决方案：在将数据送入 awk 之前，使用 `tr -d '\r'` 命令。
+          # 这个命令会删除掉数据流中所有的回车符 (`\r`)，
+          # 从而解决了因 Windows/Linux 换行符不一致导致的字符串匹配失败问题。
+          # 这是解决跨平台文本处理问题的标准做法。
+          ipinfo mmdb export ./data/ipinfo_lite.mmdb | tr -d '\r' | \
           awk '
           BEGIN { FS = "," }
           NR == 1 {
@@ -67,7 +71,7 @@ jobs:
           }
           $(cc_idx) == "SG" { print $(range_idx) }
           ' > ./sg_cidrs_all.txt
-
+ 
           if [ -s ./sg_cidrs_all.txt ]; then
             grep '\.' ./sg_cidrs_all.txt > ./sg_cidrs_ipv4.txt
             grep ':' ./sg_cidrs_all.txt > ./sg_cidrs_ipv6.txt
@@ -80,7 +84,7 @@ jobs:
             echo "⚠️ Could not find any SG IP ranges. Skipping file generation."
             echo "has_files=false" >> $GITHUB_OUTPUT
           fi
-
+          
       # 步骤7：生成三个版本的 DAT 文件
       - name: Generate DAT files
         if: steps.extract_ips.outputs.has_files == 'true'
