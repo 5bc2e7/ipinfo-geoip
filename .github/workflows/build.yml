@@ -99,30 +99,37 @@ jobs:
           # 编译 Loyalsoldier/geoip 工具
           go build ./
 
-          # 动态创建完全符合 Loyalsoldier/geoip 规范的 config.json 文件
-          # 参考文档：https://github.com/Loyalsoldier/geoip
+          # 动态创建完全符合 Loyalsoldier/geoip 官方规范的 config.json 文件
+          # 顶级结构为 "assets" (输入) 和 "rules" (输出)
           cat <<EOF > config.json
           {
-            "inputs": [
+            "assets": [
               {
-                "type": "text",
-                "tag": "sg",
+                "from": "text",
+                "tag": "sg_from_file",
                 "path": "./sg_cidrs.txt"
               }
             ],
-            "outputs": [
+            "rules": [
               {
-                "type": "v2rayGeoIPDat",
-                "path": "./output/geoip-sg.dat",
-                "lists": [
-                  "sg"
-                ]
+                "output": {
+                  "type": "v2rayGeoIPDat",
+                  "path": "./output/geoip-sg.dat",
+                  "lists": {
+                    "sg": [
+                      {
+                        "from": "sg_from_file",
+                        "select": "default"
+                      }
+                    ]
+                  }
+                }
               }
             ]
           }
           EOF
 
-          # 打印一下配置文件内容，方便调试
+          # 打印一下配置文件内容，供最终确认
           echo "Generated config.json:"
           cat config.json
 
@@ -130,9 +137,8 @@ jobs:
           mkdir -p ./output
           
           # 使用配置文件运行正确的转换命令
-          echo "Running geoip conversion with config file..."
+          echo "Running geoip conversion with the correct config file..."
           ./geoip convert -c ./config.json
-          echo "Conversion completed successfully!"
  
       # --- 核心改动结束 ---
  
