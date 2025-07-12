@@ -3,64 +3,90 @@ name: Build Custom GeoIP and IP-List Files from CSV
 
 # 工作流触发条件
 on:
-  workflow_dispatch: # 允许手动触发
+  # 允许在 GitHub Actions 页面手动触发
+  workflow_dispatch:
+  # 定时触发：每周四 UTC 时间 0 点 (北京时间上午8点) 运行
   schedule:
-    - cron: "0 0 * * 4" # 每周四 UTC 时间 0 点运行
+    - cron: "0 0 * * 4"
+  # 推送触发：当 master 分支有代码推送，且变动文件是本工作流文件时触发
   push:
     branches:
-      - master # master 分支有 push 时触发
+      - master
     paths:
-      - '.github/workflows/build.yml' # 仅当工作流文件本身变化时触发
+      - '.github/workflows/build.yml'
 
 jobs:
   build:
+    # Job 的名称
     name: Build Singapore GeoIP DAT and TXT Files
+    # Job 的运行环境，使用最新的 ubuntu 系统
     runs-on: ubuntu-latest
+    
     steps:
-      # 步骤1：检出 Loyalsoldier/geoip 的代码
+      # 步骤1：检出 Loyalsoldier/geoip 的代码，用于后续的 .dat 文件生成
       - name: Checkout geoip tool codebase
         uses: actions/checkout@v4
         with:
           repository: Loyalsoldier/geoip
           path: ./geoip-tool
 
-      # 步骤2：设置 Go 环境
+      # 步骤2：设置 Go 语言环境，版本根据 geoip 工具的 go.mod 文件自动匹配
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version-file: ./geoip-tool/go.mod
 
-      # 步骤3：设置动态变量
+      # 步骤3：设置动态变量，用于生成带有时间戳的 Release 标签和名称
       - name: Set dynamic variables
         run: |
           echo "TAG_NAME=$(date +%Y%m%d%H%M)" >> $GITHUB_ENV
           echo "RELEASE_NAME=$(date +%Y%m%d%H%M)" >> $GITHUB_ENV
         shell: bash
 
-      # 步骤4：下载并解压 IPinfo Lite CSV 数据
-      - name: Download and prepare IPinfo Lite CSV
+      # 步骤4：下载、校验并解压 IPinfo Lite CSV，这是最关键的数据获取步骤
+      - name: Download, Verify and Unzip IPinfo Lite CSV
         env:
           IPINFO_TOKEN: ${{ secrets.IPINFO_TOKEN }}
         run: |
+          # 创建数据目录
           mkdir -p ./data
+          
+          # 下载数据文件
+          echo "Downloading ipinfo_lite.csv.gz..."
           curl -fL "https://ipinfo.io/data/ipinfo_lite.csv.gz?token=${IPINFO_TOKEN}" -o ./data/ipinfo_lite.csv.gz
+          
+          # 下载校验和文件
+          echo "Downloading checksums..."
+          curl -sfL "https://ipinfo.io/data/ipinfo_lite.csv.gz/checksums?token=${IPINFO_TOKEN}" -o ./data/checksums.json
+          
+          # 开始校验文件完整性
+          echo "Verifying file integrity..."
+          # 从 json 文件中提取官方的 sha256 值
+          official_sha256=$(jq -r '.checksums.sha256' ./data/checksums.json)
+          # 计算本地下载文件的 sha256 值
+          local_sha256=$(sha256sum ./data/ipinfo_lite.csv.gz | awk '{print $1}')
+          
+          echo "Official SHA256: ${official_sha256}"
+          echo "Local SHA256:    ${local_sha256}"
+          
+          # 对比两个 sha256 值，如果不一致则报错并终止工作流
+          if [ "${official_sha256}" != "${local_sha256}" ]; then
+            echo "FATAL: Checksum mismatch! The downloaded file may be corrupted."
+            exit 1
+          fi
+          
+          # 校验成功后，解压文件
+          echo "✅ Checksum match. Unzipping the file..."
           gunzip < ./data/ipinfo_lite.csv.gz > ./data/ipinfo_lite.csv
-          echo "✅ Successfully downloaded and unzipped ipinfo_lite.csv"
-
-      # --- 最终版核心改造 ---
-      # 步骤5：从 CSV 文件提取并分流 SG 的 IP 地址段 (健壮版)
+          
+      # 步骤5：从 CSV 文件提取并分流新加坡的 IP 地址段
       - name: Extract and Split SG IP Ranges from CSV
         id: extract_ips
         run: |
-          # 增加调试步骤：打印 CSV 的表头，以便观察其真实结构
-          echo "--- CSV Header for Debugging ---"
-          head -n 1 ./data/ipinfo_lite.csv
-          echo "--------------------------------"
-
-          # 最终版 awk 脚本：
-          # 1. 动态查找 "range" 和 "country_code" 列，不再硬编码。
-          # 2. 使用 gsub() 函数去除字段中的双引号和可能存在的回车符。
-          # 3. 增加了错误检查，如果找不到关键列，会报错并停止。
+          # 使用 awk 从 CSV 文件中提取数据
+          # 1. 动态查找 "network" 和 "country_code" 列，避免因列顺序改变导致失败。
+          # 2. 使用 gsub() 函数去除字段中的双引号和回车符，保证数据干净。
+          # 3. 如果找不到关键列，会报错并停止，方便定位问题。
           cat ./data/ipinfo_lite.csv | \
           awk '
           BEGIN { FS = "," }
@@ -69,10 +95,10 @@ jobs:
                   header_field = $i
                   gsub(/"|\r/, "", header_field)
                   if (header_field == "country_code") { cc_idx = i }
-                  if (header_field == "range") { range_idx = i }
+                  if (header_field == "network") { network_idx = i }
               }
-              if (cc_idx == 0 || range_idx == 0) {
-                  print "FATAL: Could not find country_code or range columns in CSV header." > "/dev/stderr"
+              if (cc_idx == 0 || network_idx == 0) {
+                  print "FATAL: Could not find country_code or network columns in CSV header." > "/dev/stderr"
                   exit 1
               }
               next
@@ -82,30 +108,30 @@ jobs:
               gsub(/"|\r/, "", country_code)
 
               if (country_code == "SG") {
-                  range = $(range_idx)
-                  gsub(/"|\r/, "", range)
-                  print range
+                  network = $(network_idx)
+                  gsub(/"|\r/, "", network)
+                  print network
               }
           }
           ' > ./sg_cidrs_all.txt
 
+          # 检查是否成功提取到数据，如果文件为空则跳过后续步骤
           if [ -s ./sg_cidrs_all.txt ]; then
+            # 分流 IPv4 和 IPv6
             grep '\.' ./sg_cidrs_all.txt > ./sg_cidrs_ipv4.txt
             grep ':' ./sg_cidrs_all.txt > ./sg_cidrs_ipv6.txt
             
+            # 打印统计信息并设置输出变量
             echo "✅ Successfully extracted $(wc -l < ./sg_cidrs_all.txt) total ranges."
             echo "  - $(wc -l < ./sg_cidrs_ipv4.txt) IPv4 ranges."
             echo "  - $(wc -l < ./sg_cidrs_ipv6.txt) IPv6 ranges."
             echo "has_files=true" >> $GITHUB_OUTPUT
           else
-            echo "⚠️ Could not find any SG IP ranges. Please check the awk script and CSV format. Skipping file generation."
+            echo "⚠️ Could not find any SG IP ranges. Skipping file generation."
             echo "has_files=false" >> $GITHUB_OUTPUT
           fi
 
-      # 后续步骤无需任何改动，这里为了简洁省略，请保留您文件中的后续所有步骤...
-      # (Generate DAT files, Prepare text files, Generate sha256 checksums, etc.)
-      # ...
-      # 步骤6：生成三个版本的 DAT 文件
+      # 步骤6：生成三个版本的 DAT 文件 (仅当成功提取到IP时运行)
       - name: Generate DAT files
         if: steps.extract_ips.outputs.has_files == 'true'
         working-directory: ./geoip-tool
@@ -133,6 +159,7 @@ jobs:
       - name: Prepare text files for publishing
         if: steps.extract_ips.outputs.has_files == 'true'
         run: |
+          # 将生成的三个 txt 源文件也移动到 output 目录中，以便一起发布
           mv ./sg_cidrs_*.txt ./output/
 
       # 步骤8：为所有产物 (.dat 和 .txt) 创建校验和
@@ -140,12 +167,14 @@ jobs:
         if: steps.extract_ips.outputs.has_files == 'true'
         run: |
           cd ./output
+          # 遍历 output 目录中所有的 .dat 和 .txt 文件，并为它们创建 sha256sum 文件
           for name in $(ls *.dat *.txt); do
             sha256sum ${name} > ./${name}.sha256sum
           done
+          echo "Generated files and checksums:"
           ls -l
 
-      # 步骤9：将生成的产物推送到 release 分支
+      # 步骤9：将生成的产物推送到 release 分支 (用于 jsDelivr CDN)
       - name: Git push assets to "release" branch
         if: steps.extract_ips.outputs.has_files == 'true'
         run: |
@@ -157,6 +186,7 @@ jobs:
           git add -A
           git commit -m "Release: ${{ env.RELEASE_NAME }}"
           git remote add origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}"
+          # 强制推送，覆盖 release 分支的历史
           git push -f -u origin release
 
       # 步骤10：刷新 jsDelivr CDN 缓存
@@ -164,7 +194,9 @@ jobs:
         if: steps.extract_ips.outputs.has_files == 'true'
         run: |
           cd ./output
+          # 遍历所有产物，并调用 jsDelivr 的刷新 API
           for file in $(ls); do
+            echo "Purging ${file} from jsDelivr..."
             curl -sL "https://purge.jsdelivr.net/gh/${{ github.repository }}@release/${file}"
           done
 
@@ -173,9 +205,13 @@ jobs:
         if: steps.extract_ips.outputs.has_files == 'true'
         uses: svenstaro/upload-release-action@v2
         with:
+          # 使用 GitHub Actions 自动生成的 Token
           repo_token: ${{ secrets.GITHUB_TOKEN }}
+          # 上传 output 目录下的所有文件
           file: ./output/*
           file_glob: true
+          # 使用我们之前设置的动态变量作为 Release 名称和 Tag
           release_name: ${{ env.RELEASE_NAME }}
           tag: ${{ env.TAG_NAME }}
+          # 如果同名 Tag 已存在，则覆盖
           overwrite: true
