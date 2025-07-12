@@ -1,5 +1,5 @@
 # 工作流名称
-name: Build Custom GeoIP and IP-List Files
+name: Build Custom GeoIP and IP-List Files from CSV
 
 # 工作流触发条件
 on:
@@ -37,41 +37,39 @@ jobs:
           echo "RELEASE_NAME=$(date +%Y%m%d%H%M)" >> $GITHUB_ENV
         shell: bash
 
-      # 步骤4：下载 IPinfo 的 MMDB 数据库文件
-      - name: Download IPinfo Lite MMDB
+      # --- 核心改造：切换数据源 ---
+      # 步骤4：下载并解压 IPinfo Lite CSV 数据
+      - name: Download and prepare IPinfo Lite CSV
         env:
           IPINFO_TOKEN: ${{ secrets.IPINFO_TOKEN }}
         run: |
           mkdir -p ./data
-          curl -fL "https://ipinfo.io/data/ipinfo_lite.mmdb?token=${IPINFO_TOKEN}" -o ./data/ipinfo_lite.mmdb
+          curl -fL "https://ipinfo.io/data/ipinfo_lite.csv.gz?token=${IPINFO_TOKEN}" -o ./data/ipinfo_lite.csv.gz
+          # 将解压后的内容输出到标准输出，用于管道处理
+          gunzip < ./data/ipinfo_lite.csv.gz > ./data/ipinfo_lite.csv
+          echo "✅ Successfully downloaded and unzipped ipinfo_lite.csv"
 
-      # 步骤5：安装 IPinfo CLI
-      - name: Install IPinfo CLI
-        run: |
-          go install github.com/ipinfo/cli/ipinfo@latest
-          echo "$HOME/go/bin" >> $GITHUB_PATH
-
-      # 步骤6：从 MMDB 提取并分流 SG 的 IP 地址段 (最终健壮版)
-      - name: Extract and Split SG IP Ranges from MMDB
+      # --- 核心改造：直接处理 CSV 文件 ---
+      # 步骤5：从 CSV 文件提取并分流 SG 的 IP 地址段
+      - name: Extract and Split SG IP Ranges from CSV
         id: extract_ips
         run: |
-          # 最终解决方案：在将数据送入 awk 之前，使用 `tr -d '\r'` 命令。
-          # 这个命令会删除掉数据流中所有的回车符 (`\r`)，
-          # 从而解决了因 Windows/Linux 换行符不一致导致的字符串匹配失败问题。
-          # 这是解决跨平台文本处理问题的标准做法。
-          ipinfo mmdb export ./data/ipinfo_lite.mmdb | tr -d '\r' | \
+          # 直接从解压后的 CSV 文件读取数据，并进行清洗和解析
+          # 实践证明 tr -d '\r' 仍然是必须的，保证了脚本的健壮性
+          cat ./data/ipinfo_lite.csv | tr -d '\r' | \
           awk '
           BEGIN { FS = "," }
           NR == 1 {
-              for (i=1; i<=NF; i++) {
-                  if ($i == "country_code") { cc_idx = i }
-                  if ($i == "range") { range_idx = i }
-              }
+              # CSV文件的列顺序是: start_ip, end_ip, range, country_code
+              # 我们直接硬编码列号，因为官方CSV格式是稳定的
+              # 如果想更健壮，也可以用之前的动态查找列号的方法
+              range_idx = 3
+              cc_idx = 4
               next
           }
           $(cc_idx) == "SG" { print $(range_idx) }
           ' > ./sg_cidrs_all.txt
- 
+
           if [ -s ./sg_cidrs_all.txt ]; then
             grep '\.' ./sg_cidrs_all.txt > ./sg_cidrs_ipv4.txt
             grep ':' ./sg_cidrs_all.txt > ./sg_cidrs_ipv6.txt
@@ -84,8 +82,9 @@ jobs:
             echo "⚠️ Could not find any SG IP ranges. Skipping file generation."
             echo "has_files=false" >> $GITHUB_OUTPUT
           fi
-          
-      # 步骤7：生成三个版本的 DAT 文件
+
+      # 后续步骤无需任何改动
+      # 步骤6：生成三个版本的 DAT 文件
       - name: Generate DAT files
         if: steps.extract_ips.outputs.has_files == 'true'
         working-directory: ./geoip-tool
@@ -109,28 +108,23 @@ jobs:
           ./geoip convert -c ./config.json
           echo "✅ All DAT conversions completed successfully!"
 
-      # --- 新增步骤 ---
-      # 步骤8：准备 .txt 文件用于发布
+      # 步骤7：准备 .txt 文件用于发布
       - name: Prepare text files for publishing
         if: steps.extract_ips.outputs.has_files == 'true'
         run: |
-          echo "Moving source .txt files to output directory..."
           mv ./sg_cidrs_*.txt ./output/
 
-      # --- 改造步骤 ---
-      # 步骤9：为所有产物 (.dat 和 .txt) 创建校验和
+      # 步骤8：为所有产物 (.dat 和 .txt) 创建校验和
       - name: Generate sha256 checksums
         if: steps.extract_ips.outputs.has_files == 'true'
         run: |
           cd ./output
-          # 为 .dat 和 .txt 文件都创建校验和
           for name in $(ls *.dat *.txt); do
             sha256sum ${name} > ./${name}.sha256sum
           done
-          echo "Generated files and checksums:"
           ls -l
 
-      # 步骤10：将生成的产物推送到 release 分支
+      # 步骤9：将生成的产物推送到 release 分支
       - name: Git push assets to "release" branch
         if: steps.extract_ips.outputs.has_files == 'true'
         run: |
@@ -144,17 +138,16 @@ jobs:
           git remote add origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}"
           git push -f -u origin release
 
-      # 步骤11：刷新 jsDelivr CDN 缓存
+      # 步骤10：刷新 jsDelivr CDN 缓存
       - name: Purge jsdelivr CDN
         if: steps.extract_ips.outputs.has_files == 'true'
         run: |
           cd ./output
           for file in $(ls); do
-            echo "Purging ${file} from jsDelivr..."
             curl -sL "https://purge.jsdelivr.net/gh/${{ github.repository }}@release/${file}"
           done
 
-      # 步骤12：上传产物到 GitHub Release
+      # 步骤11：上传产物到 GitHub Release
       - name: Upload files to GitHub Release
         if: steps.extract_ips.outputs.has_files == 'true'
         uses: svenstaro/upload-release-action@v2
