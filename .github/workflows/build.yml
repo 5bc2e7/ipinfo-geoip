@@ -1,50 +1,74 @@
-# 工作流名称
+# ==============================================================================
+#  工作流名称: 构建自定义 GeoIP 和 IP 列表文件
+# ==============================================================================
 name: Build Custom GeoIP and IP-List Files
 
-# 工作流触发条件
+# ==============================================================================
+#  工作流触发条件
+# ==============================================================================
 on:
+  # 允许在 GitHub Actions 页面手动触发
   workflow_dispatch:
+
+  # 定时触发：每周四 UTC 时间 0 点 (北京时间上午8点) 运行
   schedule:
     - cron: "0 0 * * 4"
+
+  # 推送触发：当 master 分支有代码推送，且变动文件是本工作流文件时触发
   push:
     branches:
       - master
     paths:
       - '.github/workflows/build.yml'
 
+# ==============================================================================
+#  工作流任务 (Jobs)
+# ==============================================================================
 jobs:
   build:
+    # Job 的名称
     name: Build Multi-Country GeoIP DAT and TXT Files
+    # Job 的运行环境
     runs-on: ubuntu-latest
     
-    # --- 核心改造 1: 定义国家列表 ---
-    # 在这里定义所有需要处理的国家/地区代码，用空格隔开。
-    # 未来想增加或删除国家，只需修改这一行！
+    # --------------------------------------------------------------------------
+    #  核心配置: 在这里定义所有需要处理的国家/地区代码，用空格隔开。
+    #  未来想增加或删除国家，只需修改下面这一行！
+    #  例如: COUNTRIES: "SG HK JP US"
+    # --------------------------------------------------------------------------
     env:
-      COUNTRIES: "SG HK JP"
+      COUNTRIES: "SG HK"
 
     steps:
-      # 步骤1：检出 Loyalsoldier/geoip 的代码 (无变化)
+      # --------------------------------------------------------------------------
+      #  步骤 1: 检出工具代码
+      # --------------------------------------------------------------------------
       - name: Checkout geoip tool codebase
         uses: actions/checkout@v4
         with:
           repository: Loyalsoldier/geoip
           path: ./geoip-tool
 
-      # 步骤2：设置 Go 环境 (无变化)
+      # --------------------------------------------------------------------------
+      #  步骤 2: 设置 Go 语言环境
+      # --------------------------------------------------------------------------
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version-file: ./geoip-tool/go.mod
 
-      # 步骤3：设置动态变量 (无变化)
+      # --------------------------------------------------------------------------
+      #  步骤 3: 设置动态变量 (用于 Release 名称)
+      # --------------------------------------------------------------------------
       - name: Set dynamic variables
         run: |
           echo "TAG_NAME=$(date +%Y%m%d%H%M)" >> $GITHUB_ENV
           echo "RELEASE_NAME=$(date +%Y%m%d%H%M)" >> $GITHUB_ENV
         shell: bash
 
-      # 步骤4：下载、校验并解压 IPinfo Lite CSV (无变化)
+      # --------------------------------------------------------------------------
+      #  步骤 4: 下载、校验并解压源数据
+      # --------------------------------------------------------------------------
       - name: Download, Verify and Unzip IPinfo Lite CSV
         env:
           IPINFO_TOKEN: ${{ secrets.IPINFO_TOKEN }}
@@ -66,19 +90,17 @@ jobs:
           echo "✅ Checksum match. Unzipping the file..."
           gunzip < ./data/ipinfo_lite.csv.gz > ./data/ipinfo_lite.csv
           
-      # --- 核心改造 2: 循环提取 IP ---
-      # 步骤5：循环提取并分流所有指定国家的 IP 地址段
+      # --------------------------------------------------------------------------
+      #  步骤 5: 循环提取所有指定国家的 IP 地址段
+      # --------------------------------------------------------------------------
       - name: Extract and Split IP Ranges for All Countries
         id: extract_ips
         run: |
           HAS_ANY_FILES=false
-          # 遍历在 env 中定义的国家列表
           for country_code in ${COUNTRIES}; do
             echo "--- Processing for country: ${country_code} ---"
             lc_country_code=$(echo "${country_code}" | tr '[:upper:]' '[:lower:]')
             
-            # 使用 awk 提取当前循环国家的 IP
-            # 通过 -v 选项将 shell 变量 country_code 传递给 awk
             cat ./data/ipinfo_lite.csv | \
             awk -v cc_filter="${country_code}" '
             BEGIN { FS = "," }
@@ -100,7 +122,6 @@ jobs:
             }
             ' > ./${lc_country_code}_cidrs_all.txt
             
-            # 检查是否为当前国家提取到了数据
             if [ -s ./${lc_country_code}_cidrs_all.txt ]; then
               HAS_ANY_FILES=true
               grep '\.' ./${lc_country_code}_cidrs_all.txt > ./${lc_country_code}_cidrs_ipv4.txt
@@ -108,37 +129,30 @@ jobs:
               echo "✅ Successfully extracted $(wc -l < ./${lc_country_code}_cidrs_all.txt) ranges for ${country_code}."
             else
               echo "⚠️ Could not find any IP ranges for ${country_code}."
-              # 删除空文件
               rm ./${lc_country_code}_cidrs_all.txt
             fi
           done
           
-          # 根据是否生成了任何文件，设置输出变量
           if [ "${HAS_ANY_FILES}" = "true" ]; then
             echo "has_files=true" >> $GITHUB_OUTPUT
           else
             echo "has_files=false" >> $GITHUB_OUTPUT
           fi
 
-      # --- 核心改造 3: 动态生成 DAT 配置文件 ---
-      # 步骤6：动态生成 DAT 文件的配置文件并执行转换
+      # --------------------------------------------------------------------------
+      #  步骤 6: 动态生成 DAT 文件
+      # --------------------------------------------------------------------------
       - name: Generate DAT files
         if: steps.extract_ips.outputs.has_files == 'true'
         working-directory: ./geoip-tool
         run: |
           go build ./
-          
-          # 初始化一个空的 JSON 配置文件
           CONFIG_JSON='{"input": [], "output": []}'
           
-          # 再次遍历国家列表，为每个国家生成对应的 JSON 配置条目
           for country_code in ${COUNTRIES}; do
             lc_country_code=$(echo "${country_code}" | tr '[:upper:]' '[:lower:]')
-
-            # 仅当该国家对应的 IP 文件存在时，才为其生成配置
             if [ -f "${{ github.workspace }}/${lc_country_code}_cidrs_all.txt" ]; then
               echo "--- Generating config for ${country_code} ---"
-              # 使用 jq 工具动态地向 JSON 中添加 input 和 output 规则
               CONFIG_JSON=$(echo "${CONFIG_JSON}" | jq \
                 --arg lc_code "${lc_country_code}" \
                 --arg ws_path "${{ github.workspace }}" \
@@ -154,7 +168,6 @@ jobs:
             fi
           done
           
-          # 将最终生成的完整 JSON 写入文件
           echo "${CONFIG_JSON}" | jq . > ./config.json
           echo "Generated config.json:"
           cat ./config.json
@@ -163,14 +176,17 @@ jobs:
           ./geoip convert -c ./config.json
           echo "✅ All DAT conversions completed successfully!"
 
-      # 步骤7：准备 .txt 文件用于发布 (使用通配符，无需修改)
+      # --------------------------------------------------------------------------
+      #  步骤 7: 准备 .txt 文件用于发布
+      # --------------------------------------------------------------------------
       - name: Prepare text files for publishing
         if: steps.extract_ips.outputs.has_files == 'true'
         run: |
-          # 通配符 `*` 会自动匹配所有国家的文件 (sg_*, hk_*, 等)
           mv ./*_cidrs_*.txt ./output/
 
-      # 步骤8, 9, 10, 11: 这些步骤都作用于 output 目录，它们会自动处理所有生成的文件，无需任何修改。
+      # --------------------------------------------------------------------------
+      #  步骤 8: 为所有产物创建校验和
+      # --------------------------------------------------------------------------
       - name: Generate sha256 checksums
         if: steps.extract_ips.outputs.has_files == 'true'
         run: |
@@ -181,6 +197,9 @@ jobs:
           echo "Generated files and checksums:"
           ls -l
 
+      # --------------------------------------------------------------------------
+      #  步骤 9: 推送产物到 release 分支 (用于 CDN)
+      # --------------------------------------------------------------------------
       - name: Git push assets to "release" branch
         if: steps.extract_ips.outputs.has_files == 'true'
         run: |
@@ -194,6 +213,9 @@ jobs:
           git remote add origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}"
           git push -f -u origin release
 
+      # --------------------------------------------------------------------------
+      #  步骤 10: 刷新 jsDelivr CDN 缓存
+      # --------------------------------------------------------------------------
       - name: Purge jsdelivr CDN
         if: steps.extract_ips.outputs.has_files == 'true'
         run: |
@@ -203,6 +225,9 @@ jobs:
             curl -sL "https://purge.jsdelivr.net/gh/${{ github.repository }}@release/${file}"
           done
 
+      # --------------------------------------------------------------------------
+      #  步骤 11: 上传产物到 GitHub Release
+      # --------------------------------------------------------------------------
       - name: Upload files to GitHub Release
         if: steps.extract_ips.outputs.has_files == 'true'
         uses: svenstaro/upload-release-action@v2
@@ -213,3 +238,4 @@ jobs:
           release_name: ${{ env.RELEASE_NAME }}
           tag: ${{ env.TAG_NAME }}
           overwrite: true
+
