@@ -1,5 +1,5 @@
 # 工作流名称
-name: Build Custom GeoIP Files
+name: Build Custom GeoIP and IP-List Files
 
 # 工作流触发条件
 on:
@@ -14,7 +14,7 @@ on:
 
 jobs:
   build:
-    name: Build Singapore GeoIP DAT Files
+    name: Build Singapore GeoIP DAT and TXT Files
     runs-on: ubuntu-latest
     steps:
       # 步骤1：检出 Loyalsoldier/geoip 的代码
@@ -30,11 +30,11 @@ jobs:
         with:
           go-version-file: ./geoip-tool/go.mod
 
-      # 步骤3：设置动态变量 (优化 Release 名称)
+      # 步骤3：设置动态变量
       - name: Set dynamic variables
         run: |
           echo "TAG_NAME=$(date +%Y%m%d%H%M)" >> $GITHUB_ENV
-          echo "RELEASE_NAME=$(date +%Y%m%d%H%M)" >> $GITHUB_ENV # 直接使用时间作为 Release 名称
+          echo "RELEASE_NAME=$(date +%Y%m%d%H%M)" >> $GITHUB_ENV
         shell: bash
 
       # 步骤4：下载 IPinfo 的 MMDB 数据库文件
@@ -55,11 +55,20 @@ jobs:
       - name: Extract and Split SG IP Ranges from MMDB
         id: extract_ips
         run: |
-          # 提取所有 SG 的 IP 到一个总文件
-          ipinfo mmdb export ./data/ipinfo_lite.mmdb | awk -F, 'NR > 1 && $8=="SG" {print $1}' > ./sg_cidrs_all.txt
+          ipinfo mmdb export ./data/ipinfo_lite.mmdb | \
+          awk '
+          BEGIN { FS = "," }
+          NR == 1 {
+              for (i=1; i<=NF; i++) {
+                  if ($i == "country_code") { cc_idx = i }
+                  if ($i == "range") { range_idx = i }
+              }
+              next
+          }
+          $(cc_idx) == "SG" { print $(range_idx) }
+          ' > ./sg_cidrs_all.txt
 
           if [ -s ./sg_cidrs_all.txt ]; then
-            # 从总文件中筛选出 IPv4 和 IPv6
             grep '\.' ./sg_cidrs_all.txt > ./sg_cidrs_ipv4.txt
             grep ':' ./sg_cidrs_all.txt > ./sg_cidrs_ipv6.txt
             
@@ -78,8 +87,6 @@ jobs:
         working-directory: ./geoip-tool
         run: |
           go build ./
-
-          # 动态创建包含三个输入源和三个输出任务的 config.json
           cat <<EOF > ./config.json
           {
             "input": [
@@ -94,28 +101,32 @@ jobs:
             ]
           }
           EOF
-
-          echo "Generated config.json:"
-          cat ./config.json
-          
           mkdir -p ${{ github.workspace }}/output
-          
-          echo "Running geoip conversion for all 3 versions..."
           ./geoip convert -c ./config.json
-          echo "✅ All conversions completed successfully!"
+          echo "✅ All DAT conversions completed successfully!"
 
-      # 步骤8：为所有生成的 dat 文件创建校验和
-      - name: Generate sha256 checksums for dat files
+      # --- 新增步骤 ---
+      # 步骤8：准备 .txt 文件用于发布
+      - name: Prepare text files for publishing
+        if: steps.extract_ips.outputs.has_files == 'true'
+        run: |
+          echo "Moving source .txt files to output directory..."
+          mv ./sg_cidrs_*.txt ./output/
+
+      # --- 改造步骤 ---
+      # 步骤9：为所有产物 (.dat 和 .txt) 创建校验和
+      - name: Generate sha256 checksums
         if: steps.extract_ips.outputs.has_files == 'true'
         run: |
           cd ./output
-          for name in $(ls *.dat); do
+          # 为 .dat 和 .txt 文件都创建校验和
+          for name in $(ls *.dat *.txt); do
             sha256sum ${name} > ./${name}.sha256sum
           done
-          echo "Generated files:"
+          echo "Generated files and checksums:"
           ls -l
 
-      # 步骤9：将生成的产物推送到 release 分支
+      # 步骤10：将生成的产物推送到 release 分支
       - name: Git push assets to "release" branch
         if: steps.extract_ips.outputs.has_files == 'true'
         run: |
@@ -129,7 +140,7 @@ jobs:
           git remote add origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}"
           git push -f -u origin release
 
-      # 步骤10：刷新 jsDelivr CDN 缓存
+      # 步骤11：刷新 jsDelivr CDN 缓存
       - name: Purge jsdelivr CDN
         if: steps.extract_ips.outputs.has_files == 'true'
         run: |
@@ -139,13 +150,13 @@ jobs:
             curl -sL "https://purge.jsdelivr.net/gh/${{ github.repository }}@release/${file}"
           done
 
-      # 步骤11：上传产物到 GitHub Release
+      # 步骤12：上传产物到 GitHub Release
       - name: Upload files to GitHub Release
         if: steps.extract_ips.outputs.has_files == 'true'
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: ./output/* # 使用通配符上传 output 目录下的所有文件
+          file: ./output/*
           file_glob: true
           release_name: ${{ env.RELEASE_NAME }}
           tag: ${{ env.TAG_NAME }}
