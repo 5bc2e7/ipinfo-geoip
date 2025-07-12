@@ -73,9 +73,14 @@ jobs:
         id: extract_ips
         run: |
           echo "Extracting SG IPv4 and IPv6 ranges using IPinfo CLI..."
-          # 使用 ipinfo cli 导出，通过 awk 筛选出 sg 的 country_code, 并提取第一列 (range)
-          # awk -F, '$3=="SG"{print $1}' 过滤国家代码为 SG 的行并打印 IP 段
-          ipinfo mmdb export ./ipinfo_data/ipinfo_lite.mmdb | awk -F, 'NR > 1 && $3=="SG" {print $1}' > ./sg_cidrs.txt
+          
+          # --- 调试命令：打印 CSV 表头，方便确认列顺序 ---
+          echo "CSV Header:"
+          ipinfo mmdb export ./ipinfo_data/ipinfo_lite.mmdb | head -n 1
+          
+          # --- 正确的提取命令 ---
+          # 使用 ipinfo cli 导出，通过 awk 筛选出 country_code 为 SG 的行 (第5列)，并提取 IP 段 (第1列)
+          ipinfo mmdb export ./ipinfo_data/ipinfo_lite.mmdb | awk -F, 'NR > 1 && $5=="SG" {print $1}' > ./sg_cidrs.txt
           
           # 检查是否成功生成了 cidr 文件且文件不为空
           if [ -s ./sg_cidrs.txt ]; then
