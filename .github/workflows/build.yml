@@ -1,182 +1,162 @@
 # 工作流名称
-name: Build geoip files
- 
+name: Build Custom GeoIP File
+
 # 工作流触发条件
 on:
-  workflow_dispatch:
+  workflow_dispatch: # 允许手动触发
   schedule:
-    - cron: "0 0 * * 4"
+    - cron: "0 0 * * 4" # 每周四 UTC 时间 0 点运行
   push:
     branches:
-      - master
-    paths-ignore:
-      - ".gitignore"
-      - "LICENSE*"
-      - "*.md"
- 
+      - master # master 分支有 push 时触发
+    paths:
+      - '.github/workflows/build.yml' # 仅当工作流文件本身变化时触发
+
 jobs:
   build:
-    name: Build
+    name: Build Singapore GeoIP DAT
     runs-on: ubuntu-latest
     steps:
-      # 步骤1：检出代码
-      - name: Checkout codebase
+      # 步骤1：检出 Loyalsoldier/geoip 的代码，我们需要用它的工具
+      - name: Checkout geoip tool codebase
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
- 
-      # 步骤2：设置 Go 环境
+          repository: Loyalsoldier/geoip # 直接拉取工具的仓库
+          path: ./geoip-tool # 将工具代码放到一个子目录中
+
+      # 步骤2：检出您自己的仓库代码（如果需要，但此工作流不需要）
+      # - name: Checkout your repository
+      #   uses: actions/checkout@v4
+      #   with:
+      #     path: ./my-repo # 放到另一个目录
+
+      # 步骤3：设置 Go 环境
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: ./go.mod
- 
-      # 步骤3：设置动态变量
-      - name: Set variables
+          go-version-file: ./geoip-tool/go.mod # 使用工具仓库的 go.mod
+
+      # 步骤4：设置动态变量 (Tag 和 Release 名称)
+      - name: Set dynamic variables
         run: |
           echo "TAG_NAME=$(date +%Y%m%d%H%M)" >> $GITHUB_ENV
-          echo "RELEASE_NAME=Release ${{ env.TAG_NAME }}" >> $GITHUB_ENV
+          echo "RELEASE_NAME=Release-SG-${{ env.TAG_NAME }}" >> $GITHUB_ENV
         shell: bash
- 
-      # 步骤4：下载 IPinfo 的 MMDB 数据库文件
+
+      # 步骤5：下载 IPinfo 的 MMDB 数据库文件
       - name: Download IPinfo Lite MMDB
         env:
-          IPINFO_TOKEN: ${{ secrets.IPINFO_TOKEN }}
+          IPINFO_TOKEN: ${{ secrets.IPINFO_TOKEN }} # 请确保在仓库 Secrets 中设置了 IPINFO_TOKEN
         run: |
-          mkdir -p ./ipinfo_data
-          curl -fL "https://ipinfo.io/data/ipinfo_lite.mmdb?token=${IPINFO_TOKEN}" -o ./ipinfo_data/ipinfo_lite.mmdb
- 
-      # 步骤5：校验下载文件的 SHA256 值
-      - name: Verify MMDB Checksum
-        env:
-          IPINFO_TOKEN: ${{ secrets.IPINFO_TOKEN }}
-        run: |
-          echo "Verifying checksum..."
-          sudo apt-get update > /dev/null && sudo apt-get install -y jq
-          REMOTE_SHA256=$(curl -sL "https://ipinfo.io/data/ipinfo_lite.mmdb/checksums?token=${IPINFO_TOKEN}" | jq -r '.checksums.sha256')
-          LOCAL_SHA256=$(sha256sum ./ipinfo_data/ipinfo_lite.mmdb | awk '{print $1}')
-          if [ "${REMOTE_SHA256}" != "${LOCAL_SHA256}" ]; then
-            echo "❌ Checksum FAILED!" && exit 1
-          fi
-          echo "✅ Checksum successful."
- 
-      # --- 核心改动开始 ---
- 
-      # 步骤6：安装 IPinfo 官方命令行工具 (CLI)
+          mkdir -p ./data
+          curl -fL "https://ipinfo.io/data/ipinfo_lite.mmdb?token=${IPINFO_TOKEN}" -o ./data/ipinfo_lite.mmdb
+
+      # 步骤6：安装 IPinfo 官方命令行工具 (CLI) 用于提取数据
       - name: Install IPinfo CLI
         run: |
           go install github.com/ipinfo/cli/ipinfo@latest
           echo "$HOME/go/bin" >> $GITHUB_PATH
- 
+
       # 步骤7：从 MMDB 提取新加坡 (SG) 的 IP 地址段
       - name: Extract SG IP Ranges from MMDB
         id: extract_ips
         run: |
-          echo "Extracting SG IPv4 and IPv6 ranges using IPinfo CLI..."
-          
-          # 打印 CSV 表头，方便调试和确认列顺序
-          echo "CSV Header:"
-          ipinfo mmdb export ./ipinfo_data/ipinfo_lite.mmdb | head -n 1
-          
-          # --- 最终修正的提取命令 ---
           # 使用 ipinfo cli 导出，通过 awk 筛选出 country_code (第8列) 为 SG 的行，并提取 IP 段 (第1列)
-          ipinfo mmdb export ./ipinfo_data/ipinfo_lite.mmdb | awk -F, 'NR > 1 && $8=="SG" {print $1}' > ./sg_cidrs.txt
+          ipinfo mmdb export ./data/ipinfo_lite.mmdb | awk -F, 'NR > 1 && $8=="SG" {print $1}' > ./sg_cidrs.txt
           
           # 检查是否成功生成了 cidr 文件且文件不为空
           if [ -s ./sg_cidrs.txt ]; then
             echo "✅ Successfully extracted $(wc -l < ./sg_cidrs.txt) IP ranges to sg_cidrs.txt."
             echo "has_files=true" >> $GITHUB_OUTPUT
           else
-            echo "⚠️ Could not find any SG IP ranges in the MMDB. Skipping dat file generation."
+            echo "⚠️ Could not find any SG IP ranges. Skipping file generation."
             echo "has_files=false" >> $GITHUB_OUTPUT
           fi
 
-      # 步骤8：使用 Loyalsoldier/geoip 工具将文本IP列表转换为 dat 文件
-      # 仅在 extract_ips 步骤成功提取到 IP 时运行
-      - name: Generate dat file from text list
+      # 步骤8：生成 DAT 文件 (核心步骤)
+      # 仅在成功提取到 IP 时运行
+      - name: Generate DAT file from text list
         if: steps.extract_ips.outputs.has_files == 'true'
+        working-directory: ./geoip-tool # 进入工具代码的目录
         run: |
           # 编译 Loyalsoldier/geoip 工具
           go build ./
 
-          # 动态创建完全符合 Loyalsoldier/geoip 官方规范的 config.json 文件
-          # 顶级结构为 "assets" (输入) 和 "rules" (输出)
-          cat <<EOF > config.json
+          # 动态创建完全符合官方规范的 config.json
+          # 这个配置告诉工具：
+          # 1. [input] 从一个名为 "sg" 的 text 文件中 "add" (添加) 数据，uri 指向我们生成的 sg_cidrs.txt
+          # 2. [output] "output" (输出) 一个 "v2rayGeoIPDat" 类型的文件，
+          #    只包含我们刚刚 "add" 的 "sg" 列表 (wantedList)，并命名为 geoip-sg.dat
+          cat <<EOF > ./config.json
           {
-            "assets": [
+            "input": [
               {
-                "from": "text",
-                "tag": "sg_from_file",
-                "path": "./sg_cidrs.txt"
+                "type": "text",
+                "action": "add",
+                "args": {
+                  "name": "sg",
+                  "uri": "${{ github.workspace }}/sg_cidrs.txt"
+                }
               }
             ],
-            "rules": [
+            "output": [
               {
-                "output": {
-                  "type": "v2rayGeoIPDat",
-                  "path": "./output/geoip-sg.dat",
-                  "lists": {
-                    "sg": [
-                      {
-                        "from": "sg_from_file",
-                        "select": "default"
-                      }
-                    ]
-                  }
+                "type": "v2rayGeoIPDat",
+                "action": "output",
+                "args": {
+                  "outputDir": "${{ github.workspace }}/output",
+                  "outputName": "geoip-sg.dat",
+                  "wantedList": ["sg"]
                 }
               }
             ]
           }
           EOF
 
-          # 打印一下配置文件内容，供最终确认
+          # 打印配置文件内容，供最终确认
           echo "Generated config.json:"
-          cat config.json
+          cat ./config.json
 
           # 创建输出目录
-          mkdir -p ./output
-          
+          mkdir -p ${{ github.workspace }}/output
+
           # 使用配置文件运行正确的转换命令
-          echo "Running geoip conversion with the correct config file..."
+          echo "Running geoip conversion..."
           ./geoip convert -c ./config.json
- 
-      # --- 核心改动结束 ---
- 
+          echo "✅ Conversion completed successfully!"
+
       # 步骤9：为生成的 dat 文件创建校验和
       # 仅在成功提取到 IP 时运行
-      - name: Generate sha256 checksum for dat files
+      - name: Generate sha256 checksum for dat file
         if: steps.extract_ips.outputs.has_files == 'true'
         run: |
           cd ./output
-          for name in $(ls *.dat); do
-            sha256sum ${name} > ./${name}.sha256sum
-          done
- 
+          sha256sum geoip-sg.dat > geoip-sg.dat.sha256sum
+          ls -l
+
       # 步骤10：将生成的产物推送到 release 分支
       # 仅在成功提取到 IP 时运行
       - name: Git push assets to "release" branch
         if: steps.extract_ips.outputs.has_files == 'true'
         run: |
-          cd output
+          cd ./output
           git init
           git config --local user.name "github-actions[bot]"
           git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -b release
           git add -A
           git commit -m "Release: ${{ env.RELEASE_NAME }}"
-          git remote add geoip "https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}"
-          git push -f -u geoip release
- 
+          git remote add origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}"
+          git push -f -u origin release
+
       # 步骤11：刷新 jsDelivr CDN 缓存
       # 仅在成功提取到 IP 时运行
       - name: Purge jsdelivr CDN
         if: steps.extract_ips.outputs.has_files == 'true'
         run: |
-          cd output
-          for file in $(ls); do
-            curl -sL "https://purge.jsdelivr.net/gh/${{ github.repository }}@release/${file}"
-          done
- 
+          curl -sL "https://purge.jsdelivr.net/gh/${{ github.repository }}@release/geoip-sg.dat"
+          curl -sL "https://purge.jsdelivr.net/gh/${{ github.repository }}@release/geoip-sg.dat.sha256sum"
+
       # 步骤12：上传产物到 GitHub Release
       # 仅在成功提取到 IP 时运行
       - name: Upload files to GitHub Release
@@ -184,7 +164,8 @@ jobs:
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: ./output/geoip-sg.*
           file_glob: true
-          file: ./output/*
           release_name: ${{ env.RELEASE_NAME }}
           tag: ${{ env.TAG_NAME }}
+          overwrite: true
