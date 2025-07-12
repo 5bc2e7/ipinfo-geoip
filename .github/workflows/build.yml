@@ -74,13 +74,13 @@ jobs:
         run: |
           echo "Extracting SG IPv4 and IPv6 ranges using IPinfo CLI..."
           
-          # --- 调试命令：打印 CSV 表头，方便确认列顺序 ---
+          # 打印 CSV 表头，方便调试和确认列顺序
           echo "CSV Header:"
           ipinfo mmdb export ./ipinfo_data/ipinfo_lite.mmdb | head -n 1
           
-          # --- 正确的提取命令 ---
-          # 使用 ipinfo cli 导出，通过 awk 筛选出 country_code 为 SG 的行 (第5列)，并提取 IP 段 (第1列)
-          ipinfo mmdb export ./ipinfo_data/ipinfo_lite.mmdb | awk -F, 'NR > 1 && $5=="SG" {print $1}' > ./sg_cidrs.txt
+          # --- 最终修正的提取命令 ---
+          # 使用 ipinfo cli 导出，通过 awk 筛选出 country_code (第8列) 为 SG 的行，并提取 IP 段 (第1列)
+          ipinfo mmdb export ./ipinfo_data/ipinfo_lite.mmdb | awk -F, 'NR > 1 && $8=="SG" {print $1}' > ./sg_cidrs.txt
           
           # 检查是否成功生成了 cidr 文件且文件不为空
           if [ -s ./sg_cidrs.txt ]; then
@@ -90,6 +90,7 @@ jobs:
             echo "⚠️ Could not find any SG IP ranges in the MMDB. Skipping dat file generation."
             echo "has_files=false" >> $GITHUB_OUTPUT
           fi
+
  
       # 步骤8：使用 v2fly/geoip 工具将文本IP列表转换为 dat 文件
       # 仅在 extract_ips 步骤成功提取到 IP 时运行
