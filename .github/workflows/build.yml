@@ -37,7 +37,6 @@ jobs:
           echo "RELEASE_NAME=$(date +%Y%m%d%H%M)" >> $GITHUB_ENV
         shell: bash
 
-      # --- 核心改造：切换数据源 ---
       # 步骤4：下载并解压 IPinfo Lite CSV 数据
       - name: Download and prepare IPinfo Lite CSV
         env:
@@ -45,29 +44,49 @@ jobs:
         run: |
           mkdir -p ./data
           curl -fL "https://ipinfo.io/data/ipinfo_lite.csv.gz?token=${IPINFO_TOKEN}" -o ./data/ipinfo_lite.csv.gz
-          # 将解压后的内容输出到标准输出，用于管道处理
           gunzip < ./data/ipinfo_lite.csv.gz > ./data/ipinfo_lite.csv
           echo "✅ Successfully downloaded and unzipped ipinfo_lite.csv"
 
-      # --- 核心改造：直接处理 CSV 文件 ---
-      # 步骤5：从 CSV 文件提取并分流 SG 的 IP 地址段
+      # --- 最终版核心改造 ---
+      # 步骤5：从 CSV 文件提取并分流 SG 的 IP 地址段 (健壮版)
       - name: Extract and Split SG IP Ranges from CSV
         id: extract_ips
         run: |
-          # 直接从解压后的 CSV 文件读取数据，并进行清洗和解析
-          # 实践证明 tr -d '\r' 仍然是必须的，保证了脚本的健壮性
-          cat ./data/ipinfo_lite.csv | tr -d '\r' | \
+          # 增加调试步骤：打印 CSV 的表头，以便观察其真实结构
+          echo "--- CSV Header for Debugging ---"
+          head -n 1 ./data/ipinfo_lite.csv
+          echo "--------------------------------"
+
+          # 最终版 awk 脚本：
+          # 1. 动态查找 "range" 和 "country_code" 列，不再硬编码。
+          # 2. 使用 gsub() 函数去除字段中的双引号和可能存在的回车符。
+          # 3. 增加了错误检查，如果找不到关键列，会报错并停止。
+          cat ./data/ipinfo_lite.csv | \
           awk '
           BEGIN { FS = "," }
           NR == 1 {
-              # CSV文件的列顺序是: start_ip, end_ip, range, country_code
-              # 我们直接硬编码列号，因为官方CSV格式是稳定的
-              # 如果想更健壮，也可以用之前的动态查找列号的方法
-              range_idx = 3
-              cc_idx = 4
+              for (i=1; i<=NF; i++) {
+                  header_field = $i
+                  gsub(/"|\r/, "", header_field)
+                  if (header_field == "country_code") { cc_idx = i }
+                  if (header_field == "range") { range_idx = i }
+              }
+              if (cc_idx == 0 || range_idx == 0) {
+                  print "FATAL: Could not find country_code or range columns in CSV header." > "/dev/stderr"
+                  exit 1
+              }
               next
           }
-          $(cc_idx) == "SG" { print $(range_idx) }
+          {
+              country_code = $(cc_idx)
+              gsub(/"|\r/, "", country_code)
+
+              if (country_code == "SG") {
+                  range = $(range_idx)
+                  gsub(/"|\r/, "", range)
+                  print range
+              }
+          }
           ' > ./sg_cidrs_all.txt
 
           if [ -s ./sg_cidrs_all.txt ]; then
@@ -79,11 +98,13 @@ jobs:
             echo "  - $(wc -l < ./sg_cidrs_ipv6.txt) IPv6 ranges."
             echo "has_files=true" >> $GITHUB_OUTPUT
           else
-            echo "⚠️ Could not find any SG IP ranges. Skipping file generation."
+            echo "⚠️ Could not find any SG IP ranges. Please check the awk script and CSV format. Skipping file generation."
             echo "has_files=false" >> $GITHUB_OUTPUT
           fi
 
-      # 后续步骤无需任何改动
+      # 后续步骤无需任何改动，这里为了简洁省略，请保留您文件中的后续所有步骤...
+      # (Generate DAT files, Prepare text files, Generate sha256 checksums, etc.)
+      # ...
       # 步骤6：生成三个版本的 DAT 文件
       - name: Generate DAT files
         if: steps.extract_ips.outputs.has_files == 'true'
