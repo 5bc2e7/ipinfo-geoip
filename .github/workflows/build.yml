@@ -37,7 +37,7 @@ jobs:
     #  例如: COUNTRIES: "SG HK JP US"
     # --------------------------------------------------------------------------
     env:
-      COUNTRIES: "SG HK"
+      COUNTRIES: "SG HK JP"
 
     steps:
       # --------------------------------------------------------------------------
@@ -56,6 +56,7 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version-file: ./geoip-tool/go.mod
+          cache-dependency-path: ./geoip-tool/go.sum
 
       # --------------------------------------------------------------------------
       #  步骤 3: 设置动态变量 (用于 Release 名称)
