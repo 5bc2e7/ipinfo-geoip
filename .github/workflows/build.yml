@@ -91,7 +91,6 @@ jobs:
             echo "has_files=false" >> $GITHUB_OUTPUT
           fi
 
- 
       # 步骤8：使用 v2fly/geoip 工具将文本IP列表转换为 dat 文件
       # 仅在 extract_ips 步骤成功提取到 IP 时运行
       - name: Generate dat file from text list
@@ -99,9 +98,11 @@ jobs:
         run: |
           # 编译 v2fly/geoip 工具
           go build ./
-          # 使用 include 指令来从文本文件加载 IP 列表，并将其标记为 "sg"
-          # 这是从文本生成带标签的 geoip.dat 的标准方法
-          ./geoip -dat-file ./sg_cidrs.txt -country-code sg -output-file ./output/geoip-sg.dat
+          
+          # --- 最终修正的转换命令 ---
+          # 正确的语法是 ./geoip <子命令> [选项]
+          # 子命令是 'convert'
+          ./geoip convert -dat-file ./sg_cidrs.txt -country-code sg -output-file ./output/geoip-sg.dat
  
       # --- 核心改动结束 ---
  
