@@ -7,14 +7,9 @@ name: Build Custom GeoIP and IP-List Files
 #  工作流触发条件
 # ==============================================================================
 on:
-  # 允许在 GitHub Actions 页面手动触发
   workflow_dispatch:
-
-  # 定时触发：每周四 UTC 时间 0 点 (北京时间上午8点) 运行
   schedule:
     - cron: "0 0 * * 4"
-
-  # 推送触发：当 master 分支有代码推送，且变动文件是本工作流文件时触发
   push:
     branches:
       - master
@@ -22,38 +17,40 @@ on:
       - '.github/workflows/build.yml'
 
 # ==============================================================================
+#  全局权限声明 (必须配置: 防止 GITHUB_TOKEN 为默认只读导致 Push/Release 失败)
+# ==============================================================================
+permissions:
+  contents: write
+
+# ==============================================================================
 #  工作流任务 (Jobs)
 # ==============================================================================
 jobs:
   build:
-    # Job 的名称
     name: Build Multi-Country GeoIP DAT and TXT Files
-    # Job 的运行环境
     runs-on: ubuntu-latest
     
     # --------------------------------------------------------------------------
     #  核心配置: 在这里定义所有需要处理的国家/地区代码，用空格隔开。
-    #  未来想增加或删除国家，只需修改下面这一行！
-    #  例如: COUNTRIES: "SG HK JP US"
     # --------------------------------------------------------------------------
     env:
       COUNTRIES: "SG HK JP"
 
     steps:
       # --------------------------------------------------------------------------
-      #  步骤 1: 检出工具代码
+      #  步骤 1: 检出工具代码 (原生支持 Node 24)
       # --------------------------------------------------------------------------
       - name: Checkout geoip tool codebase
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: Loyalsoldier/geoip
           path: ./geoip-tool
 
       # --------------------------------------------------------------------------
-      #  步骤 2: 设置 Go 语言环境
+      #  步骤 2: 设置 Go 语言环境 (原生支持 Node 24)
       # --------------------------------------------------------------------------
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: ./geoip-tool/go.mod
           cache-dependency-path: ./geoip-tool/go.sum
@@ -223,20 +220,17 @@ jobs:
           cd ./output
           for file in $(ls); do
             echo "Purging ${file} from jsDelivr..."
-            curl -sL "https://purge.jsdelivr.net/gh/${{ github.repository }}@release/${file}"
+            curl -sL "https://purge.jsdelivr.net/gh/${{ github.repository }}@release/${file}" || true
           done
 
       # --------------------------------------------------------------------------
-      #  步骤 11: 上传产物到 GitHub Release
+      #  步骤 11: 上传产物到 GitHub Release (使用现代化 Action)
       # --------------------------------------------------------------------------
       - name: Upload files to GitHub Release
         if: steps.extract_ips.outputs.has_files == 'true'
-        uses: svenstaro/upload-release-action@v2
+        uses: softprops/action-gh-release@v2
         with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: ./output/*
-          file_glob: true
-          release_name: ${{ env.RELEASE_NAME }}
-          tag: ${{ env.TAG_NAME }}
-          overwrite: true
-
+          name: ${{ env.RELEASE_NAME }}
+          tag_name: ${{ env.TAG_NAME }}
+          files: ./output/*
+          make_latest: true
