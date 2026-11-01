@@ -228,7 +228,7 @@ jobs:
       # --------------------------------------------------------------------------
       - name: Upload files to GitHub Release
         if: steps.extract_ips.outputs.has_files == 'true'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           name: ${{ env.RELEASE_NAME }}
           tag_name: ${{ env.TAG_NAME }}
